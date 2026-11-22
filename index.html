@@ -35,7 +35,7 @@ button,select{background:#1c2530;color:#fff;border:1px solid #334155;padding:6px
 <div id="sendpop">
 <div style="font-size:13px;margin-bottom:6px">Send message to session queue</div>
 <textarea id="sendtext" placeholder="Type message for the agent..."></textarea>
-<input id="sendsess" placeholder="session_id (optional, empty = next in queue)" />
+<input id="sendsess" placeholder="session_id (optional, empty = last active session)" />
 <div class="row">
 <button onclick="sendMsg()">send</button>
 <button onclick="toggleSend(false)">cancel</button>
@@ -69,6 +69,7 @@ function text(o,full){
     const p = o.payload||o;
     if (typeof p.text === "string" && p.text) return p.text.slice(0,lim);
     if (typeof p.content === "string" && p.content) return p.content.slice(0,lim);
+    if (p.item && Array.isArray(p.item.content)) return p.item.content.map(function(x){return (typeof x==="string")?x:(x.text||JSON.stringify(x))}).join(String.fromCharCode(10)).slice(0,lim);
     if (Array.isArray(p.content)) return p.content.map(c=>typeof c==="string"?c:(c.text||JSON.stringify(c))).join(" ").slice(0,lim);
     if (p.content) return JSON.stringify(p.content).slice(0,lim);
     return JSON.stringify(o).slice(0,lim);
@@ -119,13 +120,18 @@ async function sendMsg(){
   try{
     const r = await fetch('/api/queue/send', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, session_id: sess || null})});
     const j = await r.json();
-    if(j.ok){ st.textContent = 'queued #' + j.id + ' depth=' + j.depth; document.getElementById('sendtext').value=''; setTimeout(()=>toggleSend(false), 900); }
+    if(j.ok){ st.textContent = 'queued #' + j.id + ' depth=' + j.depth + (j.session_id ? ' -> ' + String(j.session_id).slice(0,13) : ' (broadcast)'); document.getElementById('sendtext').value=''; try{localStorage.setItem('sendsess',sess);}catch(e){} setTimeout(()=>toggleSend(false), 900); }
     else st.textContent = 'error: ' + JSON.stringify(j);
   }catch(e){ st.textContent = 'send failed: ' + e; }
 }
 function toggleAuto(){auto=!auto;document.getElementById('autobtn').textContent=auto?'auto:on':'auto:off';arm();}
 function arm(){if(timer)clearInterval(timer);if(auto)timer=setInterval(()=>load(false),2000);}
 load(true);arm();
+try{const _ss=localStorage.getItem('sendsess');if(_ss)document.getElementById('sendsess').value=_ss;}catch(e){}
 </script>
 </body>
 </html>
+
+
+
+

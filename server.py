@@ -25,6 +25,58 @@ if not os.path.exists(QUEUE_FILE):
 
 LOCK = threading.Lock()
 
+# Last session with ingested activity. Untargeted web messages
+# (session_id null) are pinned to it at send time so concurrent
+# pollers do not race for the same message.
+LAST_ACTIVE = {"session_id": None, "ordinal": -1}
+
+
+def note_active_session(session_id, ordinal):
+    if not session_id:
+        return
+    try:
+        ordv = int(ordinal)
+    except Exception:
+        return
+    cur = LAST_ACTIVE
+    if ordv >= int(cur.get("ordinal", -1)):
+        cur["session_id"] = session_id
+        cur["ordinal"] = ordv
+
+
+def refresh_last_active_from_disk(scan_lines=3000):
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()[-scan_lines:]
+    except OSError:
+        return
+    best_ord = int(LAST_ACTIVE.get("ordinal", -1))
+    best_sid = LAST_ACTIVE.get("session_id")
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            o = json.loads(line)
+        except Exception:
+            continue
+        sid = o.get("session_id")
+        if not isinstance(sid, str):
+            sid = extract_session_id(o)
+        if not sid:
+            continue
+        try:
+            ordv = int(o.get("ordinal", -1))
+        except Exception:
+            ordv = -1
+        if ordv >= best_ord:
+            best_ord = ordv
+            best_sid = sid
+    if best_sid:
+        LAST_ACTIVE["session_id"] = best_sid
+        LAST_ACTIVE["ordinal"] = best_ord
+
+
 def cookie_token():
     return hashlib.sha256(MONITOR_PASSWORD.encode()).hexdigest() if MONITOR_PASSWORD else ""
 
@@ -106,6 +158,9 @@ def extract_session_id(obj):
             if isinstance(p.get(k), str) and len(p[k]) > 8:
                 return p[k]
     return None
+
+refresh_last_active_from_disk()
+
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -298,6 +353,8 @@ class Handler(BaseHTTPRequestHandler):
                         sid = extract_session_id(obj)
                         if sid and "session_id" not in obj:
                             obj["session_id"] = sid
+                        if sid and isinstance(obj.get("ordinal"), int):
+                            note_active_session(sid, obj["ordinal"])
                         f.write(json.dumps(obj) + "\n")
                         appended += 1
             return self.send_json({"ok": True, "appended": appended})
@@ -317,6 +374,7 @@ class Handler(BaseHTTPRequestHandler):
             sess = body.get("session_id") or None
             if sess is not None:
                 sess = str(sess).strip()[:200] or None
+            routed = sess or LAST_ACTIVE.get("session_id")
             host = body.get("host") or None
             if host is not None:
                 host = str(host).strip()[:100] or None
@@ -324,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 items = read_queue()
                 mid = "%d-%d" % (int(time.time() * 1000) % 100000000, len(items) + 1)
-                msg = {"id": mid, "text": text, "session_id": sess, "host": host,
+                msg = {"id": mid, "text": text, "session_id": routed, "host": host,
                        "created_at": now, "sender": "web"}
                 items.append(msg)
                 write_queue(items)
@@ -333,9 +391,10 @@ class Handler(BaseHTTPRequestHandler):
                 with open(DATA_FILE, "a", encoding="utf-8") as f:
                     f.write(json.dumps({"ordinal": nxt, "type": "queue_msg", "timestamp": now,
                                         "ingested_at": now, "host": "web",
-                                        "session_id": sess,
+                                        "session_id": routed,
+                                        "requested_session": sess,
                                         "payload": {"text": text}}) + "\n")
-            return self.send_json({"ok": True, "id": mid, "depth": depth})
+            return self.send_json({"ok": True, "id": mid, "depth": depth, "session_id": routed})
         self.send_json({"error": "not found"}, 404)
 
 if __name__ == "__main__":
