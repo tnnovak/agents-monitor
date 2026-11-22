@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>agents-monitor</title>
+<style>
+body{background:#0b0e14;color:#d6deeb;font-family:monospace;margin:0;padding:16px}
+h1{font-size:16px}#bar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+button,select{background:#1c2530;color:#fff;border:1px solid #334155;padding:6px 10px;cursor:pointer}
+#log{white-space:pre-wrap;font-size:12px;line-height:1.5}
+.line{border-bottom:1px solid #1e293b;padding:6px 0}.meta{color:#7dd3fc}
+.tool{color:#fbbf24}.asst{color:#a7f3d0}.err{color:#f87171}
+.host-wsl{border-left:3px solid #f0abfc;padding-left:6px}
+.host-win{border-left:3px solid #86efac;padding-left:6px}
+.hosttag{opacity:.8;font-size:11px}
+#sendfab{position:fixed;right:18px;bottom:18px;width:56px;height:56px;border-radius:50%;background:#2563eb;color:#fff;font-size:24px;border:0;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:50}
+#sendpop{position:fixed;left:0;right:0;bottom:0;background:#111827;border-top:1px solid #334155;padding:12px 16px 16px;display:none;z-index:60}
+#sendpop textarea{width:100%;height:70px;background:#0b0e14;color:#fff;border:1px solid #334155;padding:8px;font-family:monospace}
+#sendpop input{width:100%;background:#0b0e14;color:#fff;border:1px solid #334155;padding:6px;margin-top:6px;font-family:monospace}
+#sendpop .row{display:flex;gap:8px;margin-top:8px}
+#sendstat{margin-left:8px;opacity:.8}
+</style>
+</head>
+<body>
+<h1>agents-monitor — codex-live.jsonl</h1>
+<div id="bar">
+<button onclick="load(true)">reload</button>
+<button id="autobtn" onclick="toggleAuto()">auto:on</button>
+<select id="hostfilter" onchange="load(true)"><option value="">all hosts</option></select>
+<a href="/logout" style="color:#7dd3fc">logout</a> <span id="status">cursor=-1</span>
+</div>
+<div id="log"></div>
+<button id="sendfab" onclick="toggleSend(true)" title="Send message to session">&#9998;</button>
+<div id="sendpop">
+<div style="font-size:13px;margin-bottom:6px">Send message to session queue</div>
+<textarea id="sendtext" placeholder="Type message for the agent..."></textarea>
+<input id="sendsess" placeholder="session_id (optional, empty = next in queue)" />
+<div class="row">
+<button onclick="sendMsg()">send</button>
+<button onclick="toggleSend(false)">cancel</button>
+<span id="sendstat"></span>
+</div>
+</div>
+<script>
+let cursor = -1, auto = true, timer = null, shown = 0;
+const hostsSeen = new Set();
+function hostOf(o){ return o.host || ""; }
+function cls(o){
+  const t = o.type || "";
+  let c = "";
+  if (t.includes("event_msg")) c = "meta";
+  else {
+    try {
+      if ((o.payload&&(o.payload.type||"")).includes("exec")||JSON.stringify(o).includes("exec_command")) c = "tool";
+    } catch(e){}
+    if (!c && o.payload&&o.payload.role==="assistant") c = "asst";
+  }
+  const h = hostOf(o).toLowerCase();
+  if (h.startsWith("wsl")) c += " host-wsl";
+  else if (h.startsWith("win")) c += " host-win";
+  return c;
+}
+const TRUNC=800, FUL=4000;
+function text(o,full){
+  const lim=full?FUL:TRUNC;
+  try{
+    if (o._raw) return String(o._raw).slice(0,lim);
+    const p = o.payload||o;
+    if (typeof p.text === "string" && p.text) return p.text.slice(0,lim);
+    if (typeof p.content === "string" && p.content) return p.content.slice(0,lim);
+    if (Array.isArray(p.content)) return p.content.map(c=>typeof c==="string"?c:(c.text||JSON.stringify(c))).join(" ").slice(0,lim);
+    if (p.content) return JSON.stringify(p.content).slice(0,lim);
+    return JSON.stringify(o).slice(0,lim);
+  }catch(e){return String(o).slice(0,500)}
+}
+function headline(o){
+  const h=hostOf(o);
+  return `#${o.ordinal??'?'} [${o.type||'no-type'}]${h?(' ['+h+']'):''} ${o.timestamp||''} :: `;
+}
+function noteHost(h){
+  if (!h || hostsSeen.has(h)) return;
+  hostsSeen.add(h);
+  const sel = document.getElementById('hostfilter');
+  const op = document.createElement('option');
+  op.value = h; op.textContent = h;
+  sel.appendChild(op);
+}
+async function load(reset){
+  if(reset){cursor=-1;shown=0;document.getElementById('log').innerHTML='';}
+  const hf = document.getElementById('hostfilter').value;
+  const r = await fetch('/api/logs?limit=200&since='+cursor+(hf?('&host='+encodeURIComponent(hf)):''));
+  const j = await r.json();
+  const box = document.getElementById('log');
+  for(const o of j.lines){
+    noteHost(hostOf(o));
+    const d=document.createElement('div');
+    d.className='line '+cls(o);
+    const hl=headline(o), tx=text(o,false);
+    d.textContent=hl+tx+(tx.length>=TRUNC?" \u2026[+]":"");
+    if(tx.length>=TRUNC){d.style.cursor="pointer";d.title="click to expand/collapse";d.onclick=()=>{const ex=d.classList.toggle("exp");d.textContent=hl+text(o,ex);};}
+    box.appendChild(d);
+  }
+  shown += j.lines.length;
+  cursor=j.cursor;
+  document.getElementById('status').textContent=`cursor=${cursor} new=${j.count} shown=${shown} host=${hf||'all'} auto=${auto?"on":"off"}`;
+  box.scrollTop=box.scrollHeight;
+}
+function toggleSend(open){
+  document.getElementById('sendpop').style.display = open ? 'block' : 'none';
+  if(open){ document.getElementById('sendtext').focus(); }
+}
+async function sendMsg(){
+  const text = document.getElementById('sendtext').value.trim();
+  const sess = document.getElementById('sendsess').value.trim();
+  const st = document.getElementById('sendstat');
+  if(!text){ st.textContent = 'empty message'; return; }
+  st.textContent = 'sending...';
+  try{
+    const r = await fetch('/api/queue/send', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, session_id: sess || null})});
+    const j = await r.json();
+    if(j.ok){ st.textContent = 'queued #' + j.id + ' depth=' + j.depth; document.getElementById('sendtext').value=''; setTimeout(()=>toggleSend(false), 900); }
+    else st.textContent = 'error: ' + JSON.stringify(j);
+  }catch(e){ st.textContent = 'send failed: ' + e; }
+}
+function toggleAuto(){auto=!auto;document.getElementById('autobtn').textContent=auto?'auto:on':'auto:off';arm();}
+function arm(){if(timer)clearInterval(timer);if(auto)timer=setInterval(()=>load(false),2000);}
+load(true);arm();
+</script>
+</body>
+</html>
